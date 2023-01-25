@@ -1,3 +1,4 @@
+// Package generate generates documentation pages for a given package.
 package generate
 
 import (
@@ -54,6 +55,27 @@ var makePresentationPipe = pipe.New(pipe.Options{}).
 		dArgs := args[0].(docsArgs)
 		return dArgs
 	}).
+	Append(func(args docsArgs) (docsArgs, []os.FileInfo, error) {
+		infos, err := args.FS.ReadDir(args.OutputPath)
+		return args, infos, pipe.CheckError(!errors.Is(err, os.ErrNotExist), err)
+	}).
+	Append(func(args docsArgs, infos []os.FileInfo) (docsArgs, error) {
+		fileNames := make(map[string]bool)
+		for _, info := range infos {
+			fileNames[info.Name()] = info.IsDir()
+		}
+		hasMinimalFiles := true
+		for fileName, shouldBeDir := range map[string]bool{ // file base name -> isDir
+			"lib":        true,
+			"pkg":        true,
+			"src":        true,
+			"index.html": false,
+		} {
+			isDir, exists := fileNames[fileName]
+			hasMinimalFiles = hasMinimalFiles && exists && (isDir == shouldBeDir)
+		}
+		return args, pipe.CheckError(len(infos) > 0 && !hasMinimalFiles, errors.Errorf("refusing to clean output directory %q - directory does not resemble a gopages result; remove the directory to continue", args.OutputPath))
+	}).
 	Append(func(args docsArgs) (docsArgs, error) {
 		return args, errors.Wrap(util.RemoveAll(args.FS, args.OutputPath), "Failed to clean output directory")
 	}).
@@ -79,13 +101,14 @@ var makePresentationPipe = pipe.New(pipe.Options{}).
 		pres := godoc.NewPresentation(corpus)
 		pres.AdjustPageInfoMode = func(req *http.Request, mode godoc.PageInfoMode) godoc.PageInfoMode {
 			switch {
-			case req.URL.Path == "/pkg/", strings.HasPrefix(req.URL.Path, "/pkg/") && strings.HasSuffix(req.URL.Path, "/internal/"):
+			case args.IndexInternalPackages,
+				req.URL.Path == "/pkg/",
+				strings.HasPrefix(req.URL.Path, "/pkg/") && strings.HasSuffix(req.URL.Path, "/internal/"):
 				mode |= godoc.NoFiltering
 			}
 			return mode
 		}
 		// attempt to override URLs for source code links
-		// TODO fix links from source pages back to docs
 		pres.URLForSrc = func(src string) string {
 			// seems godoc lib documentation is incorrect here, 'src' is actually the whole package path to the file
 			src = strings.TrimPrefix(src, "/")
@@ -192,7 +215,7 @@ var (
 		}).
 		Append(func(args docsArgs, file string, isDir bool) (docsArgs, string, bool, error) {
 			// skip the destination directory if it's set to avoid infinite recursion
-			return args, file, isDir, pipe.CheckError(isDir && args.OutputPath != "" && strings.TrimPrefix(file, "/") == args.OutputPath, filepath.SkipDir)
+			return args, file, isDir, pipe.CheckError(isDir && args.OutputPath != "" && strings.TrimPrefix(file, string(filepath.Separator)) == args.OutputPath, filepath.SkipDir)
 		}).
 		Append(func(args docsArgs, file string, isDir bool) (docsArgs, string, bool, error) {
 			// only scrape directories and Go files
